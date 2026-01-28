@@ -1,2 +1,10 @@
 neon database npx connection:
 npx neonctl@latest init
+
+neon databse credentials:
+Username: neondb_owner
+Password: npg_XyBcuVF6aI2Y
+Host (Endpoint): ep-lingering-cloud-agupkl9f.c-2.eu-central-1.aws.neon.tech
+Port: 5432 (This is the default for Postgres)
+Database Name: neondb
+SSL Mode: require
