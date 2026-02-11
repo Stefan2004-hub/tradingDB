@@ -1,0 +1,74 @@
+Here's my proposed implementation:
+-- 1. Accumulation Trades Table
+CREATE TABLE accumulation_trades (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    
+    -- Link to the SELL transaction (exit)
+    exit_transaction_id UUID NOT NULL REFERENCES transactions(id),
+    
+    -- Link to the BUY transaction (re-entry) - NULL until executed
+    reentry_transaction_id UUID REFERENCES transactions(id),
+    
+    -- Asset being traded
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    
+    -- The key metric: old vs new coin amounts
+    old_coin_amount NUMERIC(20, 18) NOT NULL,  -- Coins sold (gross_amount)
+    new_coin_amount NUMERIC(20, 18),             -- Coins bought back (NULL until re-entry)
+    
+    -- Calculated: extra coins gained (or lost)
+    accumulation_delta NUMERIC(20, 18) GENERATED ALWAYS AS (
+        COALESCE(new_coin_amount, 0) - old_coin_amount
+    ) STORED,
+    
+    -- Status tracking
+    status VARCHAR(10) NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED', 'CANCELLED')),
+    
+    -- Performance metrics
+    exit_price_usd NUMERIC(20, 18) NOT NULL,      -- Price when sold
+    reentry_price_usd NUMERIC(20, 18),             -- Price when bought back
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Optional notes on your prediction/reasoning
+    prediction_notes TEXT
+);
+-- 2. Index for performance
+CREATE INDEX idx_accumulation_trades_status ON accumulation_trades(status);
+CREATE INDEX idx_accumulation_trades_asset ON accumulation_trades(asset_id);
+How to use it in your app logic:
+1. When you Sell (expecting a drop):
+   - Insert the SELL into transactions
+   - Insert into accumulation_trades:
+     - exit_transaction_id = the sell transaction ID
+     - asset_id = BTC/ETH/etc
+     - old_coin_amount = gross_amount sold
+     - exit_price_usd = unit_price_usd
+     - status = 'OPEN'
+2. When you Buy the Dip:
+   - Insert the BUY into transactions
+   - Update the accumulation_trades row:
+     - reentry_transaction_id = the buy transaction ID
+     - new_coin_amount = net_amount bought
+     - reentry_price_usd = unit_price_usd
+     - status = 'CLOSED'
+     - closed_at = CURRENT_TIMESTAMP
+Query to see your "Dip Buying" performance:
+SELECT 
+    at.id,
+    a.symbol,
+    at.old_coin_amount,
+    at.new_coin_amount,
+    at.accumulation_delta,
+    at.exit_price_usd,
+    at.reentry_price_usd,
+    ROUND(((at.reentry_price_usd - at.exit_price_usd) / at.exit_price_usd * 100), 2) AS price_change_pct,
+    at.created_at AS sold_date,
+    at.closed_at AS bought_back_date,
+    EXTRACT(EPOCH FROM (at.closed_at - at.created_at))/3600 AS hours_open
+FROM accumulation_trades at
+JOIN assets a ON at.asset_id = a.id
+WHERE at.status = 'CLOSED'
+ORDER BY at.accumulation_delta DESC;

@@ -125,3 +125,35 @@ JOIN exchanges e ON t.exchange_id = e.id
 GROUP BY a.symbol, e.name;
 
 Why this works:Correct Wallet Balance: By using net_amount for buys and gross_amount for sells, your balance stays accurate even when Bybit or Binance "takes a bite" of your coins.USD Tracking: The total_invested_usd tells you exactly how much "real money" left your bank account.Profit Calculation: To get your profit, you simply take:$$(Current Balance * Current Market Price) - Total Invested USD$$A Quick Bit of Advice:Since you are using Neon, keep an eye on your NUMERIC(20, 8) types. Some coins (like SHIB or PEPE) have many zeros after the decimal point. If you plan on trading those "meme" coins, you might even want to increase the second number (the scale) to 18 to match Ethereum's internal precision.
+
+1. Realized Profit (The "Locked In" Money)
+This is the profit you make the moment you sell a coin. It’s a historical fact that never changes. You should store this in your transactions table specifically for SELL rows.
+
+Update your transactions table to include this:
+ALTER TABLE transactions ADD COLUMN realized_pnl NUMERIC(20, 8);
+
+How it's calculated:When you sell, your app (or a database trigger) calculates:$$Realized Profit = (Sale Price \times Amount) - (Avg Buy Price \times Amount) - Fees$$You then save that result into the realized_pnl column for that specific sell transaction.
+
+2. Unrealized Profit (The "Paper" Money)
+This is what you would make if you sold everything right now. Since the "current price" is always changing, this lives in a SQL View.
+
+You can calculate this by joining your portfolio summary (what you own) with your historic data (the latest price).
+
+Query to see your Current Profit:
+SELECT 
+    p.symbol,
+    p.current_balance,
+    p.avg_buy_price,
+    h.closing_price AS current_market_price,
+    -- Formula: (Current Price - Avg Buy Price) * Balance
+    (h.closing_price - p.avg_buy_price) * p.current_balance AS unrealized_profit_usd
+FROM user_portfolio_performance p
+JOIN btc_historic_data h ON h.day_date = (SELECT MAX(day_date) FROM btc_historic_data)
+WHERE p.symbol = 'BTC';
+
+Where to look for the "Total"
+To get the full picture of your "Wealth" in the app, you will sum these two up:
+
+From Transactions Table: SUM(realized_pnl) → Total cash you've actually made.
+
+From the View above: unrealized_profit_usd → How much your current "bags" are worth.
