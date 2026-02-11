@@ -88,3 +88,20 @@ insert into btc_historic_data (day_date, high_price, low_price, closing_price) v
 (to_date('Sun 25 Jan ''26','Dy DD Mon ''YY'), 89193, 86003, 86572),
 (to_date('Mon 26 Jan ''26','Dy DD Mon ''YY'), 88743, 86429, 88267),
 (to_date('Tue 27 Jan ''26','Dy DD Mon ''YY'), 89427, 87228, 89102);
+
+--p2
+insert into btc_historic_data (day_date, high_price, low_price, closing_price) values
+(to_date('Wed 28 Jan ''26','Dy DD Mon ''YY'),90439, 88721, 89184),
+(to_date('Thu 29 Jan ''26','Dy DD Mon ''YY'),89200, 83250, 84561),
+(to_date('Fri 30 Jan ''26','Dy DD Mon ''YY'),84602, 81071, 84128),
+(to_date('Sat 31 Jan ''26','Dy DD Mon ''YY'),84136, 75815, 78621),
+(to_date('Sun 1 Feb ''26','Dy DD Mon ''YY'),79322, 75698, 76974),
+(to_date('Mon 2 Feb ''26','Dy DD Mon ''YY'),79258, 74551, 78688),
+(to_date('Tue 3 Feb ''26','Dy DD Mon ''YY'),79118, 72897, 75633),
+(to_date('Wed 4 Feb ''26','Dy DD Mon ''YY'),76864, 71779, 73019),
+(to_date('Thu 5 Feb ''26','Dy DD Mon ''YY'),73148, 62248, 62799),
+(to_date('Fri 6 Feb ''26','Dy DD Mon ''YY'),71681, 60074, 70555),
+(to_date('Sat 7 Feb ''26','Dy DD Mon ''YY'),71611, 67364, 69281),
+(to_date('Sun 8 Feb ''26','Dy DD Mon ''YY'),72206, 68852, 70264),
+(to_date('Mon 9 Feb ''26','Dy DD Mon ''YY'),71369, 68291, 70120),
+(to_date('Tue 10 Feb ''26','Dy DD Mon ''YY'),70464, 67913, 68793);

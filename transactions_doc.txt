@@ -1,0 +1,127 @@
+To build a robust trading app, you’ll want to move away from one giant table and toward a normalized structure. This prevents data redundancy and makes it much easier to handle "waves" of investment (often called DCA or Dollar Cost Averaging).
+
+Since your profit changes every time the market price moves, we won't store "Total Earning" as a static number. Instead, we’ll store your Transactions and calculate the earnings dynamically using a SQL View.
+
+1. The Database Plan
+We will use three tables to keep things organized:
+
+assets: Stores the coins (BTC, ETH, SOL, etc.).
+
+exchanges: Stores where your coins are (Binance, Coinbase, Cold Wallet).
+
+transactions: Stores every "wave" or batch of buying/selling.
+
+The Scripts:
+-- 1. Create the Assets table
+CREATE TABLE assets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol VARCHAR(10) NOT NULL UNIQUE, -- e.g., 'BTC'
+    name VARCHAR(50) NOT NULL           -- e.g., 'Bitcoin'
+);
+
+-- 2. Create the Exchanges table
+CREATE TABLE exchanges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(50) NOT NULL UNIQUE    -- e.g., 'Binance'
+);
+
+-- 3. Create the Transactions table (The "Waves")
+CREATE TABLE transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID REFERENCES assets(id),
+    exchange_id UUID REFERENCES exchanges(id),
+    transaction_type VARCHAR(4) CHECK (transaction_type IN ('BUY', 'SELL')),
+    amount NUMERIC(20, 8) NOT NULL,        -- How many coins
+    price_per_unit NUMERIC(20, 8) NOT NULL, -- Price at the time
+    fees NUMERIC(20, 8) DEFAULT 0,
+    transaction_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+3. Calculating the "Total Sum of Investment"
+To see your totals without doing the math yourself every time, we can create a View. This acts like a virtual table that updates automatically as you add new transactions.
+
+CREATE VIEW portfolio_summary AS
+SELECT 
+    a.name AS coin_name,
+    e.name AS exchange_name,
+    SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.amount ELSE -t.amount END) AS total_holdings,
+    SUM(CASE WHEN t.transaction_type = 'BUY' THEN (t.amount * t.price_per_unit) + t.fees ELSE 0 END) AS total_invested_usd
+FROM transactions t
+JOIN assets a ON t.asset_id = a.id
+JOIN exchanges e ON t.exchange_id = e.id
+GROUP BY a.name, e.name;
+
+-----------------------------------------------
+transaction refactorring:
+This is a classic "Accounting for Crypto" challenge. Because fees are sometimes "inclusive" (taken from the coin) and sometimes "exclusive" (paid in USD), your database needs to track two different numbers for every trade: what you intended to buy/sell (Gross) and what actually landed in your wallet (Net).
+
+To handle this properly in Postgres, we will modify the transactions table to include columns for both the fee and the net amount.
+
+1. The Updated Transactions Table
+We will add fee_amount, fee_currency (to track if it was BTC or USD), and net_amount (the actual coins added to your wallet).
+
+CREATE TABLE transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID REFERENCES assets(id),
+    exchange_id UUID REFERENCES exchanges(id),
+    transaction_type VARCHAR(4) CHECK (transaction_type IN ('BUY', 'SELL')),
+    
+    -- Financial details
+    gross_amount NUMERIC(20, 8) NOT NULL,    -- The 10 BTC you ordered
+    fee_amount NUMERIC(20, 8) DEFAULT 0,    -- The 0.1 BTC fee
+    fee_currency VARCHAR(10),                -- 'BTC' or 'USD'
+    net_amount NUMERIC(20, 8) NOT NULL,      -- The 9.9 BTC that hit your wallet
+    
+    unit_price_usd NUMERIC(20, 8) NOT NULL,  -- Price of 1 coin at that moment
+    total_spent_usd NUMERIC(20, 8) NOT NULL, -- Total USD out of pocket (Gross * Price + USD fees)
+    
+    transaction_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+2. How to handle the two "Fee Scenarios"
+When you write your application code (or manual SQL inserts), you will follow these two logic paths:
+
+Scenario A: The Buy (Fee taken from the coin)
+Gross: 10 BTC
+
+Fee: 0.1 BTC
+
+Net: 9.9 BTC
+
+Total Spent USD: 10 BTC * Price (Since the fee was part of the 10 you "paid for").
+
+Scenario B: The Sell (Fee taken in USD)
+Gross: 1 BTC
+
+Fee: 50.00
+
+Fee Currency: 'USD'
+
+Net: 1 BTC (You sold exactly 1)
+
+Total Received USD: (1 BTC * Price) - 50.00.
+
+3. The "Profit & Loss" View
+This is the "magic" query. It calculates your Holdings (using the net_amount) and your Cost Basis (how much USD you actually spent).
+
+CREATE OR REPLACE VIEW user_portfolio_performance AS
+SELECT 
+    a.symbol,
+    e.name AS exchange,
+    -- Total coins currently in wallet
+    SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.net_amount ELSE -t.gross_amount END) AS current_balance,
+    -- Total USD spent to get those coins
+    SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.total_spent_usd ELSE 0 END) AS total_invested_usd,
+    -- Average price you paid per coin (Breakeven point)
+    CASE 
+        WHEN SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.net_amount ELSE 0 END) > 0 
+        THEN SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.total_spent_usd ELSE 0 END) / 
+             SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.net_amount ELSE 0 END)
+        ELSE 0 
+    END AS avg_buy_price
+FROM transactions t
+JOIN assets a ON t.asset_id = a.id
+JOIN exchanges e ON t.exchange_id = e.id
+GROUP BY a.symbol, e.name;
+
+Why this works:Correct Wallet Balance: By using net_amount for buys and gross_amount for sells, your balance stays accurate even when Bybit or Binance "takes a bite" of your coins.USD Tracking: The total_invested_usd tells you exactly how much "real money" left your bank account.Profit Calculation: To get your profit, you simply take:$$(Current Balance * Current Market Price) - Total Invested USD$$A Quick Bit of Advice:Since you are using Neon, keep an eye on your NUMERIC(20, 8) types. Some coins (like SHIB or PEPE) have many zeros after the decimal point. If you plan on trading those "meme" coins, you might even want to increase the second number (the scale) to 18 to match Ethereum's internal precision.
