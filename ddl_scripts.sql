@@ -99,3 +99,141 @@ CREATE TABLE accumulation_trades (
 -- 2. Index for performance
 CREATE INDEX idx_accumulation_trades_status ON accumulation_trades(status);
 CREATE INDEX idx_accumulation_trades_asset ON accumulation_trades(asset_id);
+
+--created by opencode
+
+-- ==========================================
+-- STRATEGY TABLES FOR TRADING ASSISTANT
+-- ==========================================
+
+-- 1. Sell Strategies: One threshold per coin for automatic sell alerts
+CREATE TABLE sell_strategies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    threshold_percent NUMERIC(5, 2) NOT NULL CHECK (threshold_percent > 0),  -- e.g., 4.00 for 4%
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(asset_id)  -- Only one strategy per asset
+);
+
+CREATE INDEX idx_sell_strategies_active ON sell_strategies(asset_id, is_active);
+
+-- 2. Buy Strategies: Dip threshold and USD amount per coin for "buy the dip"
+CREATE TABLE buy_strategies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    dip_threshold_percent NUMERIC(5, 2) NOT NULL CHECK (dip_threshold_percent > 0),  -- e.g., 5.00 = buy when 5% below peak
+    buy_amount_usd NUMERIC(20, 2) NOT NULL CHECK (buy_amount_usd > 0),              -- e.g., 100.00 = buy $100 worth
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(asset_id)  -- Only one strategy per asset
+);
+
+CREATE INDEX idx_buy_strategies_active ON buy_strategies(asset_id, is_active);
+
+-- 3. Strategy Alerts: Track when strategies trigger
+CREATE TABLE strategy_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    strategy_type VARCHAR(4) NOT NULL CHECK (strategy_type IN ('BUY', 'SELL')),
+    trigger_price NUMERIC(20, 8) NOT NULL,        -- Price when alert was triggered
+    threshold_percent NUMERIC(5, 2) NOT NULL,     -- The threshold that was met
+    reference_price NUMERIC(20, 8) NOT NULL,      -- Buy price for SELL alerts, peak price for BUY alerts
+    alert_message TEXT,                           -- Human-readable description
+    status VARCHAR(12) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACKNOWLEDGED', 'EXECUTED', 'DISMISSED')),
+    acknowledged_at TIMESTAMP WITH TIME ZONE,
+    executed_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_strategy_alerts_asset ON strategy_alerts(asset_id);
+CREATE INDEX idx_strategy_alerts_status ON strategy_alerts(status);
+CREATE INDEX idx_strategy_alerts_pending ON strategy_alerts(asset_id, strategy_type, status) WHERE status = 'PENDING';
+
+-- 4. Price Peaks: Track highest price since last buy for each asset
+CREATE TABLE price_peaks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL UNIQUE REFERENCES assets(id),  -- One active peak per asset
+    last_buy_transaction_id UUID REFERENCES transactions(id),  -- Reference to the last BUY
+    peak_price NUMERIC(20, 8) NOT NULL,           -- Highest price observed since last buy
+    peak_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_price_peaks_asset_active ON price_peaks(asset_id, is_active);
+
+-- ==========================================
+-- VIEWS FOR STRATEGY OPPORTUNITIES
+-- ==========================================
+
+-- View: Identify SELL opportunities (transactions that exceeded their threshold)
+-- Usage in Spring Boot: Query this view with current_price parameter
+CREATE OR REPLACE VIEW sell_opportunities AS
+SELECT 
+    t.id AS transaction_id,
+    a.symbol,
+    a.name AS asset_name,
+    t.transaction_type,
+    t.unit_price_usd AS buy_price,
+    t.net_amount AS coin_amount,
+    ss.threshold_percent,
+    -- Calculate target sell price: buy_price * (1 + threshold/100)
+    t.unit_price_usd * (1 + ss.threshold_percent / 100) AS target_sell_price
+FROM transactions t
+JOIN assets a ON t.asset_id = a.id
+JOIN sell_strategies ss ON ss.asset_id = t.asset_id AND ss.is_active = true
+WHERE t.transaction_type = 'BUY'
+  AND ss.threshold_percent IS NOT NULL;
+
+-- View: Identify BUY opportunities (assets that dipped below their threshold from peak)
+CREATE OR REPLACE VIEW buy_opportunities AS
+SELECT 
+    a.id AS asset_id,
+    a.symbol,
+    a.name AS asset_name,
+    bs.dip_threshold_percent,
+    bs.buy_amount_usd,
+    pp.peak_price,
+    -- Calculate target buy price: peak_price * (1 - dip_threshold/100)
+    pp.peak_price * (1 - bs.dip_threshold_percent / 100) AS target_buy_price,
+    pp.last_buy_transaction_id,
+    pp.peak_timestamp AS last_peak_timestamp
+FROM buy_strategies bs
+JOIN assets a ON bs.asset_id = a.id
+LEFT JOIN price_peaks pp ON pp.asset_id = bs.asset_id AND pp.is_active = true
+WHERE bs.is_active = true;
+
+-- ==========================================
+-- HELPER FUNCTION
+-- ==========================================
+
+-- Function: Reset price peak when a new BUY transaction is inserted
+-- Call this from your Spring Boot service after inserting a new BUY transaction
+CREATE OR REPLACE FUNCTION reset_price_peak_on_buy()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Insert or update price_peaks with the buy price as the new starting point
+    INSERT INTO price_peaks (asset_id, last_buy_transaction_id, peak_price, peak_timestamp, is_active)
+    VALUES (NEW.asset_id, NEW.id, NEW.unit_price_usd, NEW.transaction_date, true)
+    ON CONFLICT (asset_id) 
+    DO UPDATE SET
+        last_buy_transaction_id = NEW.id,
+        peak_price = NEW.unit_price_usd,
+        peak_timestamp = NEW.transaction_date,
+        is_active = true,
+        updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to auto-reset price peak on new BUY transaction
+DROP TRIGGER IF EXISTS trg_reset_price_peak ON transactions;
+CREATE TRIGGER trg_reset_price_peak
+    AFTER INSERT ON transactions
+    FOR EACH ROW
+    WHEN (NEW.transaction_type = 'BUY')
+    EXECUTE FUNCTION reset_price_peak_on_buy();

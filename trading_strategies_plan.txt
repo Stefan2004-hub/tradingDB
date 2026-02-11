@@ -1,0 +1,109 @@
+I will also need some tables, where I can store the sell strategies (for example to set for a certain coin a threshold, like I want to set for BTC a 4% threshold, so that when the current price is bigger with 4% then the one that I had when I bought the coin to tell mw which transaction is beyond the 4% threshold - I need a different threshold for each coin) and the Buy strategies, for each coin I need to set an individual threshold and the sum (in USD) I need to use to buy the next "dip"
+This is where your app moves from a simple "tracker" to a "trading assistant." Since you are using Java/Spring, you'll want a table that stores these "rules" and a clean way to query which historical buys are now "ready" to be sold based on those rules.
+
+1. The Strategy Table
+Instead of hardcoding thresholds, we’ll create a table linked to your assets. This allows you to set a 4% threshold for BTC, a 10% threshold for ETH, and so on.
+
+2. Identifying "Threshold Met" Transactions
+In your Spring Boot application, you likely have a service that fetches the "Current Price" (let's call the variable currentPrice). You can use the following query in your Spring Data JPA Repository to find every transaction that has grown beyond the user's specific threshold.
+
+The SQL logic for your @Query:
+
+3. Implementing the "Buy the Dip" logic
+For the Buy Strategy, your Java logic would typically monitor the price drop from a "Recent Peak." You can store that peak in the database or handle it in your Spring Service.
+
+When the "Buy" trigger hits:
+
+Your app checks asset_strategies.buy_amount_usd for that coin.
+
+It calculates how many coins that buys: amount_to_buy = buy_amount_usd / current_price.
+
+It executes the transaction and logs it into your transactions table.
+----------------------------------------------
+Based on your existing database structure, here's a plan for the Sell Strategies and Buy Strategies tables:
+Proposed Schema
+1. Sell Strategies Table
+CREATE TABLE sell_strategies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    threshold_percent NUMERIC(5, 2) NOT NULL,  -- e.g., 4.00 for 4%
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(asset_id)  -- One strategy per asset
+);
+2. Buy Strategies Table  
+CREATE TABLE buy_strategies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    dip_threshold_percent NUMERIC(5, 2) NOT NULL,  -- e.g., 5.00 = buy at 5% below peak
+    buy_amount_usd NUMERIC(20, 2) NOT NULL,        -- e.g., 100.00 = buy $100 worth
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(asset_id)  -- One strategy per asset
+);
+3. Price Peaks Table (for buy-the-dip tracking)
+CREATE TABLE price_peaks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id),
+    peak_price NUMERIC(20, 8) NOT NULL,
+    peak_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    is_active BOOLEAN DEFAULT true,  -- Only one active peak per asset
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_price_peaks_asset_active ON price_peaks(asset_id, is_active);
+Questions before I generate the DDL:
+1. Multiple strategies per coin? Should you be able to set multiple thresholds for the same coin (e.g., BTC sell at 4% AND 10%), or just one per coin?
+2. Buy dip calculation: For "buy the dip" - should the dip be calculated from:
+   - All-time high?
+   - Recent peak (last 30 days)?
+   - Highest price since last buy?
+3. Strategy activation: Do you want to track when a strategy triggers (store alerts/notifications in a table), or just query on-the-fly?
+
+Database Schema Design
+1. sell_strategies table
+- One record per asset
+- Stores sell threshold percentage (e.g., 4%)
+- Active/inactive flag
+2. buy_strategies table  
+- One record per asset
+- Stores dip threshold % (e.g., 5% below peak)
+- Stores USD amount to invest (e.g., $100)
+3. strategy_alerts table
+- Tracks every time a strategy triggers
+- Records trigger price, threshold met, alert type (BUY/SELL)
+- Status: PENDING, ACKNOWLEDGED, EXECUTED, DISMISSED
+4. price_peaks table
+- Tracks the highest price observed since the last BUY transaction
+- Updated by your application when polling current prices
+- Used to calculate "dip %" for buy strategies
+5. sell_opportunities view
+- Joins transactions + sell_strategies + current prices
+- Shows all transactions that have exceeded their sell threshold
+6. buy_opportunities view  
+- Joins buy_strategies + price_peaks + current prices
+- Shows assets ready for "buy the dip" based on highest price since last buy
+-----------------------------------------------------------------------------
+Done! I've added the strategy tables to ddl_scripts.sql. Here's what's now included:
+New Tables Added
+1. sell_strategies - One per asset with sell threshold (e.g., BTC = 4%)
+2. buy_strategies - One per asset with dip threshold + USD amount to invest
+3. strategy_alerts - Tracks all triggered strategies with PENDING/ACKNOWLEDGED/EXECUTED/DISMISSED status
+4. price_peaks - Stores highest price since last buy, auto-resets on new BUY
+Views Added
+- sell_opportunities - Shows all transactions ready to sell (current price > buy_price * (1 + threshold/100))
+- buy_opportunities - Shows assets ready for dip-buying (current price < peak * (1 - dip_threshold/100))
+Auto-Reset Feature
+A trigger automatically resets the price peak when you insert a new BUY transaction, starting the "highest since last buy" tracking from your purchase price.
+Sample Usage
+-- Set BTC sell threshold to 4%
+INSERT INTO sell_strategies (asset_id, threshold_percent) 
+VALUES ((SELECT id FROM assets WHERE symbol='BTC'), 4.00);
+-- Set ETH buy strategy: buy $100 when 5% below peak
+INSERT INTO buy_strategies (asset_id, dip_threshold_percent, buy_amount_usd)
+VALUES ((SELECT id FROM assets WHERE symbol='ETH'), 5.00, 100.00);
+-- Query sell opportunities (your Spring app checks current_price > target_sell_price)
+SELECT * FROM sell_opportunities WHERE symbol = 'BTC';
+-- Query buy opportunities (your Spring app checks current_price < target_buy_price)
+SELECT * FROM buy_opportunities WHERE symbol = 'ETH';
